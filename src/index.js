@@ -7,7 +7,8 @@ const HTML = `<!doctype html>
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
-<title>Sitemap XML → CSV</title>
+<title>Sitemap XML â†’ CSV (ZIP)</title>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/jszip/3.10.1/jszip.min.js"></script>
 <style>
 *{box-sizing:border-box}
 body{margin:0;font-family:system-ui,-apple-system,Segoe UI,Roboto,Arial;background:#f5f7fb;color:#172033}
@@ -42,13 +43,14 @@ button:disabled{opacity:.5;cursor:not-allowed}
 <div class="wrap">
 
 <div class="card">
-<h1>📥 Sitemap XML → CSV</h1>
+<h1>ðŸ“¥ Sitemap XML â†’ CSV (one ZIP)</h1>
 
 <p>
 Paste a sitemap index such as
 <code>/sitemap/youtube-channels</code>,
 an individual XML sitemap, or multiple sitemap URLs.
 The tool discovers child sitemaps automatically and processes them in small Cloudflare batches.
+All CSVs are collected and downloaded as a single ZIP file at the end.
 </p>
 
 <label>Sitemap / sitemap-index URL(s)</label>
@@ -57,13 +59,14 @@ The tool discovers child sitemaps automatically and processes them in small Clou
 https://socialcounts.org/sitemap/youtube-videos/246.xml"></textarea>
 
 <div class="row">
-<button id="start">Start conversion</button>
+<button id="start">Start conversion â†’ ZIP</button>
 <button id="stop" class="danger" disabled>Stop</button>
 <button id="clear" class="secondary">Clear</button>
 </div>
 
 <p class="hint">
 <span class="pill">Batch size: ${MAX_BATCH}</span>
+<span class="pill">All CSVs â†’ one ZIP</span>
 Each Worker invocation fetches at most ${MAX_BATCH} sitemap files.
 Previously fetched sitemaps can be served from the Worker cache for 24 hours.
 </p>
@@ -113,6 +116,13 @@ function csvEscape(v){
   return '"'+String(v??"").replace(/"/g,'""')+'"';
 }
 
+function makeCsvContent(urls){
+  const lines=["url"];
+  for(const u of urls)
+    lines.push(csvEscape(u));
+  return "\\uFEFF"+lines.join("\\r\\n")+"\\r\\n";
+}
+
 function extractLocs(xml){
   const doc=new DOMParser().parseFromString(xml,"application/xml");
 
@@ -148,30 +158,41 @@ function isSitemapIndex(xml){
   ) || /<sitemapindex[\\s>]/i.test(xml);
 }
 
-function saveCsv(name,urls){
-  const lines=["url"];
+async function downloadZip(files){
+  if(!files.length){
+    log("No CSV files to zip.","err");
+    return;
+  }
 
-  for(const u of urls)
-    lines.push(csvEscape(u));
+  if(typeof JSZip==="undefined"){
+    log("JSZip library failed to load.","err");
+    return;
+  }
 
-  const blob=new Blob(
-    ["\\uFEFF"+lines.join("\\r\\n")+"\\r\\n"],
-    {type:"text/csv;charset=utf-8"}
-  );
+  const zip=new JSZip();
+  for(const f of files){
+    zip.file(f.name,f.content);
+  }
+
+  const blob=await zip.generateAsync({
+    type:"blob",
+    compression:"DEFLATE",
+    compressionOptions:{level:6}
+  });
 
   const objectUrl=URL.createObjectURL(blob);
   const a=document.createElement("a");
-
   a.href=objectUrl;
-  a.download=name;
-
+  a.download="sitemaps-"+new Date().toISOString().slice(0,19).replace(/[:T]/g,"-")+".zip";
   document.body.appendChild(a);
   a.click();
   a.remove();
 
   setTimeout(()=>{
     URL.revokeObjectURL(objectUrl);
-  },30000);
+  },60000);
+
+  log("ðŸ“¦ ZIP downloaded with "+files.length+" CSV file(s)","ok");
 }
 
 function urlName(url,i){
@@ -221,7 +242,6 @@ async function apiGet(url){
 /*
   Streaming batch:
   Each completed sitemap is received immediately.
-  The browser doesn't wait for all 20 before starting downloads.
 */
 async function apiBatchStream(urls,onItem){
 
@@ -270,7 +290,7 @@ async function apiBatchStream(urls,onItem){
       try{
         await onItem(JSON.parse(line));
       }catch(e){
-        log("⚠ Invalid server result","err");
+        log("âš  Invalid server result","err");
       }
     }
 
@@ -300,7 +320,7 @@ async function discover(startUrls){
     $("status").textContent=
       "Reading index/sitemap: "+u;
 
-    log("→ "+u);
+    log("â†’ "+u);
 
     try{
 
@@ -314,7 +334,7 @@ async function discover(startUrls){
         queue.push(...children);
 
         log(
-          "↳ Found "+
+          "â†³ Found "+
           children.length.toLocaleString()+
           " child sitemaps",
           "ok"
@@ -335,7 +355,7 @@ async function discover(startUrls){
         (+$("failed").textContent)+1;
 
       log(
-        "✗ "+u+" — "+e.message,
+        "âœ— "+u+" â€” "+e.message,
         "err"
       );
     }
@@ -385,6 +405,9 @@ $("start").onclick=async()=>{
     return;
   }
 
+  // Collect all CSV files for the final ZIP
+  const csvFiles=[];
+
   try{
 
     const direct=await discover(starts);
@@ -403,7 +426,7 @@ $("start").onclick=async()=>{
     $("status").textContent=
       "Processing "+
       total.toLocaleString()+
-      " sitemap(s)…";
+      " sitemap(s)â€¦";
 
     for(
       let i=0;
@@ -417,17 +440,13 @@ $("start").onclick=async()=>{
       );
 
       log(
-        "⚡ Processing batch "+
+        "âš¡ Processing batch "+
         (Math.floor(i/${MAX_BATCH})+1)+
-        " — "+
+        " â€” "+
         batch.length+
         " sitemaps"
       );
 
-      /*
-        Results arrive one-by-one.
-        CSV download starts immediately.
-      */
       await apiBatchStream(
         batch,
         async item=>{
@@ -443,7 +462,7 @@ $("start").onclick=async()=>{
               (+$("failed").textContent)+1;
 
             log(
-              "✗ "+n+" — "+item.error,
+              "âœ— "+n+" â€” "+item.error,
               "err"
             );
 
@@ -460,13 +479,11 @@ $("start").onclick=async()=>{
                   i+$("done").textContent
                 );
 
-              /*
-                DOWNLOAD IMMEDIATELY
-              */
-              saveCsv(
-                filename,
-                urls
-              );
+              // Collect instead of downloading immediately
+              csvFiles.push({
+                name:filename,
+                content:makeCsvContent(urls)
+              });
 
               $("found").textContent=
                 (+$("found").textContent)+
@@ -476,8 +493,8 @@ $("start").onclick=async()=>{
                 (+$("created").textContent)+1;
 
               log(
-                "✓ "+filename+
-                " — "+
+                "âœ“ "+filename+
+                " â€” "+
                 urls.length.toLocaleString()+
                 " URLs",
                 "ok"
@@ -489,8 +506,8 @@ $("start").onclick=async()=>{
                 (+$("failed").textContent)+1;
 
               log(
-                "✗ Parse "+n+
-                " — "+e.message,
+                "âœ— Parse "+n+
+                " â€” "+e.message,
                 "err"
               );
             }
@@ -509,10 +526,16 @@ $("start").onclick=async()=>{
       );
     }
 
+    // Create & download the single ZIP
+    if(!stopped && csvFiles.length){
+      $("status").textContent="Creating ZIPâ€¦";
+      await downloadZip(csvFiles);
+    }
+
   }catch(e){
 
     log(
-      "✗ "+e.message,
+      "âœ— "+e.message,
       "err"
     );
 
@@ -528,8 +551,8 @@ $("start").onclick=async()=>{
 
     log(
       stopped
-        ? "■ Stopped."
-        : "🎉 Finished.",
+        ? "â–  Stopped."
+        : "ðŸŽ‰ Finished.",
       stopped ? "" : "ok"
     );
   }
@@ -539,7 +562,7 @@ $("stop").onclick=()=>{
   stopped=true;
 
   $("status").textContent=
-    "Stopping after the current batch…";
+    "Stopping after the current batchâ€¦";
 };
 
 $("clear").onclick=()=>{
@@ -592,10 +615,10 @@ function validTarget(value){
   Fetch sitemap with Worker cache.
 
   First request:
-  SocialCounts → Worker → Cache
+  SocialCounts â†’ Worker â†’ Cache
 
   Later request:
-  Worker Cache → fast response
+  Worker Cache â†’ fast response
 */
 async function fetchSitemap(target){
 
